@@ -862,7 +862,7 @@ Panel {
                 Repeater {
                   model: root.worldRows
 
-                  Row {
+                  Item {
                     required property var modelData
                     width: worldColumn.width
                     height: Style.space(22)
@@ -941,7 +941,7 @@ Panel {
                 Repeater {
                   model: root.upcomingList
 
-                  Row {
+                  Item {
                     required property var modelData
                     width: upcomingColumn.width
                     height: Style.space(22)
