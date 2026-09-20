@@ -72,6 +72,25 @@ Panel {
   readonly property var weekdays: Model.weekdayOrder(weekStart)
   readonly property var weeks: Model.monthGrid(viewYear, viewMonth, weekStart, todayKey)
 
+  // ---- World clock, climate, holidays, events. Same plain settings as
+  //      the bars above; empty values simply hide their blocks.
+  readonly property var places: Model.parsePlaces(setting("places", ""))
+  readonly property var worldRows: Model.worldClockRows(setting("places", ""), root.today)
+
+  // The report is the same current-conditions shape the model's parser
+  // keeps ({temperature_2m, apparent_temperature, weather_code, is_day});
+  // a missing or unusable one just hides the line. Shared omarchy unit
+  // convention: metric unless the unit setting says imperial.
+  readonly property bool celsius: String(setting("unit", "")).toLowerCase() !== "imperial"
+  readonly property var climate: Model.climateFromReport(root.weatherReport())
+
+  // The Easter long weekend is the one holiday table the model ships, and
+  // the country filter is the panel's own, so dots and the upcoming list
+  // only mark the countries actually configured. The dots follow the month
+  // being browsed; the upcoming list follows today.
+  readonly property var easterHolidays: Model.easterHolidaysForYear(viewYear)
+  readonly property var upcomingList: Model.upcomingHolidays(Model.easterHolidaysForYear(today.getFullYear()), 5, todayKey)
+
 
   // Guarded so the widget renders before the bar is injected (the bar-widget
   // contract instantiates it bare).
@@ -217,6 +236,31 @@ Panel {
 
   function toggleWeekStart() {
     setWeekStart(Model.toggledWeekStart(root.weekStart))
+  }
+
+  // The stored report may be a plain object or a JSON string; either way
+  // it lands as the object the model's report parser wants.
+  function weatherReport() {
+    var raw = setting("weather", null)
+    if (raw && typeof raw === "string") {
+      try { return JSON.parse(raw) } catch (e) { return null }
+    }
+    return raw
+  }
+
+  // Holidays are filtered by country, the same "Name, CC" lines the world
+  // clock parses. Empty config marks nothing.
+  function holidayCountry() {
+    var list = Model.parseCountryList(setting("holidayCountry", ""))
+    return list.length > 0 ? list[0].cc : ""
+  }
+
+  // Guarded so a missing report renders nothing rather than crashing the
+  // binding: the model's null comes back as an empty line.
+  function climateText() {
+    var c = root.climate
+    if (!c) return ""
+    return c.glyph + " " + Model.tempLabel(c.temperature, root.celsius) + " · feels " + Model.tempLabel(c.feelsLike, root.celsius)
   }
 
   // English short day names, matching the rest of the interface.
@@ -658,7 +702,12 @@ Panel {
                     model: modelData.days
 
                     Rectangle {
+                      id: dayCell
                       required property var modelData
+
+                      property string dayFlags: Model.holidayFlagsForDay(root.easterHolidays, modelData.year, modelData.month, modelData.day)
+                      property string dayHolidays: Model.holidayLabelsForDay(root.easterHolidays, modelData.year, modelData.month, modelData.day)
+                      property bool hasHoliday: root.holidayCountry() !== "" && dayFlags.indexOf(root.holidayCountry()) !== -1
 
                       width: root.cellWidth
                       height: root.cellHeight
@@ -679,6 +728,32 @@ Panel {
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.body
                         font.bold: modelData.today
+                      }
+
+                      // Holiday mark, a dot under the day number only when
+                      // that day is one in the configured country. Hovering
+                      // the cell names the holiday.
+                      Rectangle {
+                        visible: dayCell.hasHoliday
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: Style.space(3)
+                        width: Style.space(5)
+                        height: Style.space(5)
+                        radius: width / 2
+                        color: Style.selectedStateColor(root.contentForeground, Color.accent)
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.NoButton
+
+                        PanelToolTip {
+                          visible: parent.containsMouse && dayCell.hasHoliday
+                          text: dayCell.dayHolidays
+                          fontFamily: root.contentFontFamily
+                        }
                       }
                     }
                   }
@@ -752,6 +827,146 @@ Panel {
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.moveMonth(1)
+              }
+            }
+          }
+
+          // ---- World clock, when places are configured: each row is the
+          //      place name, its local time, and the country code the
+          //      model attached. Nothing renders without any places.
+          Item {
+            visible: root.places.length > 0
+            width: parent.width
+            height: visible ? worldBlock.height : 0
+
+            Item {
+              id: worldBlock
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: gridColumn.width
+              height: worldColumn.height
+
+              Column {
+                id: worldColumn
+                width: parent.width
+                spacing: Style.space(5)
+
+                Text {
+                  text: "WORLD"
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                  font.letterSpacing: 1
+                  font.bold: true
+                }
+
+                Repeater {
+                  model: root.worldRows
+
+                  Row {
+                    required property var modelData
+                    width: worldColumn.width
+                    height: Style.space(22)
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: modelData.name
+                      color: root.contentForeground
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: modelData.time + "  " + modelData.cc
+                      color: Qt.darker(root.contentForeground, 1.5)
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // ---- Current conditions, one quiet line beneath the calendar
+          //      when a report is available. The glyph and the "feels"
+          //      both come out of the model's report parser.
+          Item {
+            visible: root.climate !== null
+            width: parent.width
+            height: visible ? climateItem.height : 0
+
+            Text {
+              id: climateItem
+              textFormat: Text.PlainText
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: root.climateText()
+              color: Qt.darker(root.contentForeground, 1.5)
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
+          // ---- Upcoming holidays, a few capped lines the model already
+          //      sorted and dated. The date is read off the model's key.
+          Item {
+            visible: root.upcomingList.length > 0
+            width: parent.width
+            height: visible ? upcomingBlock.height : 0
+
+            Item {
+              id: upcomingBlock
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: gridColumn.width
+              height: upcomingColumn.height
+
+              Column {
+                id: upcomingColumn
+                width: parent.width
+                spacing: Style.space(5)
+
+                Text {
+                  text: "UPCOMING"
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                  font.letterSpacing: 1
+                  font.bold: true
+                }
+
+                Repeater {
+                  model: root.upcomingList
+
+                  Row {
+                    required property var modelData
+                    width: upcomingColumn.width
+                    height: Style.space(22)
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: modelData.name
+                      color: root.contentForeground
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: Qt.formatDate(new Date(Number(modelData.key.slice(0, 4)), Number(modelData.key.slice(5, 7)) - 1, Number(modelData.key.slice(8, 10))), "d MMM · yyyy", root.labelLocale)
+                      color: Qt.darker(root.contentForeground, 1.5)
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                }
               }
             }
           }
