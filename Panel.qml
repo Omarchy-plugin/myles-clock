@@ -1,12 +1,15 @@
 import QtQuick
+import QtQuick.Controls as QQC
 import Quickshell
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
 // The clock's calendar popup: a month grid with ISO week numbers, built to
-// sit beside the weather panel — same hero-over-detail composition, same
-// spacing scale, same small-caps labels.
+// sit beside the weather panel. The header doubles as a title bar with a
+// gear that swaps the whole body between the calendar and a settings sheet,
+// so everything the widget knows how to display is reachable without editing
+// shell.json by hand.
 //
 // The grid is a read-out rather than a picker: today is the only marked
 // day, and the only thing that moves is which month is on screen —
@@ -91,6 +94,43 @@ Panel {
   readonly property var easterHolidays: Model.easterHolidaysForYear(viewYear)
   readonly property var upcomingList: Model.upcomingHolidays(Model.easterHolidaysForYear(today.getFullYear()), 5, todayKey)
 
+  // ---- Settings view. The gear in the header swaps the popup between the
+  //      calendar and a form. Nothing here writes shell.json directly; it
+  //      funnels through persistSettings() exactly like the calendar's own
+  //      inline editors, so hot changes survive reopens.
+  property bool showingSettings: false
+  readonly property bool settingsVertical: root.hostWidget
+    ? root.hostWidget.vertical === true : false
+  readonly property string formatKey: root.settingsVertical ? "verticalFormat" : "format"
+  readonly property string activeClockFormat: setting(root.formatKey, "")
+  readonly property string weekStartChoice: {
+    var stored = setting("weekStartDay", null)
+    return stored === null ? "default" : String(stored).toLowerCase()
+  }
+  readonly property string unitChoice: String(setting("unit", "metric")).toLowerCase()
+  readonly property string headerMeta: Qt.formatDate(root.today, "HH:mm")
+    + "  \u00b7  ISO W" + Model.isoWeekLiteral(root.today.getFullYear(), root.today.getMonth() + 1, root.today.getDate())
+    + "  \u00b7  day " + Model.dayOfYear(root.today.getFullYear(), root.today.getMonth() + 1, root.today.getDate())
+    + "/365"
+
+  // The format picker lists the presets for the current orientation plus the
+  // configured format when it is a hand-written one, so whatever is active
+  // is always selectable.
+  readonly property var displayFormatOptions: {
+    var presets = Model.clockFormats(root.settingsVertical)
+    var out = []
+    for (var i = 0; i < presets.length; i++)
+      out.push({ format: presets[i], selected: presets[i] === root.activeClockFormat })
+    var active = root.activeClockFormat
+    if (active !== "") {
+      var known = false
+      for (var j = 0; j < out.length; j++) {
+        if (out[j].format === active) { known = true; break }
+      }
+      if (!known) out.push({ format: active, selected: true })
+    }
+    return out
+  }
 
   // Guarded so the widget renders before the bar is injected (the bar-widget
   // contract instantiates it bare).
@@ -162,6 +202,84 @@ Panel {
 
   function moveYear(delta) {
     moveMonth(delta * 12)
+  }
+
+  // ---- Settings view actions. Every toggle below is a whole-config write
+  //      through persistSettings(), the same path the inline editors take.
+
+  function toggleSettings() {
+    // Leaving the sheet folds any half-typed edits in; the fields' own blur
+    // commit already covers most exits, this catches the gear click itself.
+    if (root.showingSettings) {
+      if (placesEditor) root.commitPlacesText(placesEditor.text)
+      if (countryField) root.commitHolidayCountry(countryField.text)
+    }
+    root.showingSettings = !root.showingSettings
+  }
+
+  function setClockFormat(format) {
+    if (!format || format === root.activeClockFormat) return
+    var values = {}
+    values[root.formatKey] = format
+    root.persistSettings(values)
+  }
+
+  // "default" restores the system locale's first day of the week; anything
+  // else is a weekday name the model already understands as a choice.
+  function setWeekStartChoice(value) {
+    if (value === "default") {
+      root.persistSettings({ weekStartDay: null })
+      return
+    }
+    root.setWeekStart(Model.normalizedWeekStart(value, 1))
+  }
+
+  function setUnit(value) {
+    if (value !== root.unitChoice) root.persistSettings({ unit: value })
+  }
+
+  // Free-text editors commit on blur so typing never throttles the config
+  // write. Whitespace-only input is stored empty, which simply hides the
+  // affected surface.
+  function commitPlacesText(text) {
+    var cleaned = String(text).replace(/[\r\n]+/g, "\n").replace(/\s+$/g, "")
+    if (cleaned === root.setting("places", "")) return
+    root.persistSettings({ places: cleaned })
+  }
+
+  function commitHolidayCountry(text) {
+    var cleaned = String(text).replace(/^\s+|\s+$/g, "")
+    if (cleaned === root.setting("holidayCountry", "")) return
+    root.persistSettings({ holidayCountry: cleaned })
+  }
+
+  function commitBirthYear(year) {
+    if (year === root.birthYear) return
+    root.persistSettings({ birthYear: Model.parseBirthYear(year, root.today.getFullYear()) })
+  }
+
+  function commitLifeExpectancy(years) {
+    if (years === root.lifeExpectancy) return
+    root.persistSettings({ lifeExpectancy: Model.parseLifeExpectancy(years) })
+  }
+
+  function clearLifeSetting() {
+    root.persistSettings({ birthYear: 0 })
+  }
+
+  // A live preview for the format chips: the bar's 'ww' ISO-week token is
+  // substituted first (Qt has no specifier of its own), and vertical newlines
+  // collapse to middots so a chip stays one line tall.
+  function formatDisplayLabel(format) {
+    var text = String(format === undefined || format === null ? "" : format)
+    if (text.indexOf("ww") !== -1) {
+      text = text.replace(/ww/g, String(Model.isoWeekLiteral(root.today.getFullYear(), root.today.getMonth() + 1, root.today.getDate())))
+    }
+    try {
+      var rendered = Qt.formatDate(root.today, text)
+      if (rendered && rendered !== "") return String(rendered).replace(/\n/g, " \u00b7 ")
+    } catch (e) { }
+    return text
   }
 
   // Applied locally first so the panel redraws on the click itself; the
@@ -293,7 +411,9 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: root.editingLife
+      // The settings sheet hands the keyboard to its controls: Tab/arrows
+      // walk the form instead of stepping the month grid.
+      blocked: root.editingLife || root.showingSettings
       onMoveRequested: function(dx, dy) {
         if (dx !== 0) root.moveMonth(dx)
         if (dy !== 0) root.moveYear(dy)
@@ -327,55 +447,31 @@ Panel {
           width: Math.max(calendarScroll.width, gridColumn.width)
           spacing: Style.space(8)
 
-          // ---- Hero: today, centered. Once the view has stepped back
-          //      it is also the way home — clicking the date you are
-          //      looking for beats hunting for a reset button.
+          // ---- Header: a title bar instead of a floating lock-up. The
+          //      date reads at heading weight on the left with the living
+          //      clock meta beneath it; the gear pins to the trailing edge
+          //      and swaps the whole body between the calendar and its
+          //      settings. Stepping the view back turns the left block into
+          //      a "back to today" target, same as the old centered hero.
           Item {
             width: parent.width
-            height: heroRow.height
+            height: Style.space(56)
 
-            Row {
-              id: heroRow
-              anchors.horizontalCenter: parent.horizontalCenter
-              spacing: Style.space(22)
-
-              Text {
-                // Baseline-aligned, not center-aligned: "July 26" carries a
-                // descender, so centering the two boxes leaves the icon
-                // sitting visibly low against the digits.
-                anchors.baseline: heroDate.baseline
-                text: "󰃭"
-                color: heroMouse.containsMouse
-                  ? Style.hoverStateColor(root.contentForeground, Color.accent)
-                  : root.contentForeground
-                font.family: root.contentFontFamily
-                // Decorative, and deliberately outside the Style.font.*
-                // scale. Sized so the glyph reads at the cap height of the
-                // date beside it rather than towering over it.
-                font.pixelSize: 48
-              }
-
-              Text {
-                id: heroDate
-                textFormat: Text.PlainText
-                anchors.verticalCenter: parent.verticalCenter
-                text: Qt.formatDate(root.today, "MMMM d")
-                color: heroMouse.containsMouse
-                  ? Style.hoverStateColor(root.contentForeground, Color.accent)
-                  : root.contentForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: 52
-                font.bold: true
-              }
+            PanelSeparator {
+              anchors.bottom: parent.bottom
+              anchors.left: parent.left
+              anchors.right: parent.right
+              foreground: root.contentForeground
+              strength: 1.0
             }
 
             MouseArea {
               id: heroMouse
-              x: heroRow.x
-              y: heroRow.y
-              width: heroRow.width
-              height: heroRow.height
-              enabled: !root.viewingCurrentMonth
+              anchors.top: parent.top
+              anchors.bottom: parent.bottom
+              anchors.left: parent.left
+              anchors.right: settingsGear.left
+              enabled: !root.viewingCurrentMonth && !root.showingSettings
               hoverEnabled: enabled
               cursorShape: Qt.PointingHandCursor
               onClicked: root.goToToday()
@@ -386,505 +482,659 @@ Panel {
                 fontFamily: root.contentFontFamily
               }
             }
-          }
 
-          // ---- Year progress, doubling as the rule under the hero:
-          //      a plain hairline said nothing, and whole days done
-          //      over days in the year says the same thing louder.
-          Item {
-            width: parent.width
-            height: yearBlock.y + yearBlock.height
+            Row {
+              anchors.left: parent.left
+              anchors.right: settingsGear.left
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.spacing.controlPaddingX
+              spacing: Style.space(12)
 
-            Item {
-              id: yearBlock
-              y: Style.space(6)
-              anchors.horizontalCenter: parent.horizontalCenter
-              width: gridColumn.width
-              height: Math.max(yearLabel.implicitHeight, Style.space(10))
-
-              TapHandler {
-                enabled: !root.editingLife
-                onDoubleTapped: root.startEditingLife()
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "󰃭"
+                color: heroMouse.containsMouse
+                  ? Style.hoverStateColor(root.contentForeground, Color.accent)
+                  : Qt.darker(root.contentForeground, 1.3)
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.iconLarge
               }
 
-              Row {
-                visible: root.editingLife
+              Column {
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(2)
+
+                Text {
+                  id: heroDate
+                  textFormat: Text.PlainText
+                  text: root.showingSettings
+                    ? "Preferences"
+                    : Qt.formatDate(root.today, "dddd, MMMM d")
+                  color: heroMouse.containsMouse
+                    ? Style.hoverStateColor(root.contentForeground, Color.accent)
+                    : root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.heading
+                  font.bold: true
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: root.showingSettings
+                    ? "myles.clock \u00b7 changes apply immediately"
+                    : root.headerMeta
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                  font.letterSpacing: 0.5
+                }
+              }
+            }
+
+            PanelActionButton {
+              id: settingsGear
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.rightMargin: Style.space(6)
+              iconText: "\u2699"
+              tooltipText: root.showingSettings ? "Back to calendar" : "Settings"
+              foreground: root.showingSettings
+                ? Style.hoverStateColor(root.contentForeground, Color.accent)
+                : root.contentForeground
+              hoverColor: Style.hoverStateColor(root.contentForeground, Color.accent)
+              fontFamily: root.contentFontFamily
+              focusable: true
+              bordered: root.showingSettings
+              onClicked: root.toggleSettings()
+            }
+          }
+
+          // ---- Calendar body. Wrapped in one switchable stack so the
+          //      settings form replaces it wholesale and the popup resizes
+          //      to whichever view is open.
+          Column {
+            id: calendarView
+            visible: !root.showingSettings
+            width: parent.width
+            spacing: Style.space(8)
+
+            // ---- Year progress, doubling as the rule under the header:
+            //      a plain hairline said nothing, and whole days done
+            //      over days in the year says the same thing louder.
+            Item {
+              width: parent.width
+              height: yearBlock.y + yearBlock.height
+
+              Item {
+                id: yearBlock
+                y: Style.space(6)
                 anchors.horizontalCenter: parent.horizontalCenter
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(10)
+                width: gridColumn.width
+                height: Math.max(yearLabel.implicitHeight, Style.space(10))
 
-                Text {
+                TapHandler {
+                  enabled: !root.editingLife
+                  onDoubleTapped: root.startEditingLife()
+                }
+
+                Row {
+                  visible: root.editingLife
+                  anchors.horizontalCenter: parent.horizontalCenter
                   anchors.verticalCenter: parent.verticalCenter
-                  text: "BORN"
-                  color: Qt.darker(root.contentForeground, 1.5)
-                  font.family: root.contentFontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  font.letterSpacing: 1
-                }
-
-                TextField {
-                  id: bornField
-                  width: Style.space(70)
-                  anchors.verticalCenter: parent.verticalCenter
-                  placeholderText: "year"
-                  foreground: root.contentForeground
-                  font.family: root.contentFontFamily
-                  inputMethodHints: Qt.ImhDigitsOnly
-
-                  Keys.onPressed: function(event) { root.handleLifeKey(event, expectancyField) }
-                }
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  anchors.verticalCenterOffset: 0
-                  leftPadding: Style.space(6)
-                  text: "LIVE TO"
-                  color: Qt.darker(root.contentForeground, 1.5)
-                  font.family: root.contentFontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  font.letterSpacing: 1
-                }
-
-                TextField {
-                  id: expectancyField
-                  width: Style.space(60)
-                  anchors.verticalCenter: parent.verticalCenter
-                  placeholderText: "90"
-                  foreground: root.contentForeground
-                  font.family: root.contentFontFamily
-                  inputMethodHints: Qt.ImhDigitsOnly
-
-                  Keys.onPressed: function(event) { root.handleLifeKey(event, bornField) }
-                }
-              }
-
-              Text {
-                id: yearLabel
-                textFormat: Text.PlainText
-                visible: !root.editingLife
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.today.getFullYear()
-                color: Qt.darker(root.contentForeground, 1.5)
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.letterSpacing: 1
-              }
-
-              Text {
-                id: yearPercent
-                textFormat: Text.PlainText
-                visible: !root.editingLife
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.yearDonePercent + "%"
-                color: root.contentForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              Rectangle {
-                id: yearTrack
-                visible: !root.editingLife
-                anchors.left: yearLabel.right
-                anchors.right: yearPercent.left
-                anchors.leftMargin: Style.space(12)
-                anchors.rightMargin: Style.space(12)
-                anchors.verticalCenter: parent.verticalCenter
-                height: Style.space(6)
-                radius: Style.cornerRadius > 0 ? height / 2 : 0
-                color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.12)
-
-                Rectangle {
-                  width: Math.round(parent.width * root.yearDone)
-                  height: parent.height
-                  radius: parent.radius
-                  color: Style.selectedStateColor(root.contentForeground, Color.accent)
-
-                  Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                }
-              }
-            }
-          }
-
-          // ---- Memento mori. Only here once someone has gone looking and
-          //      given an age; the same rail as the year above it, measured
-          //      against a nominal lifetime.
-          Item {
-            visible: root.birthYear > 0
-            width: parent.width
-            height: visible ? lifeBlock.height : 0
-
-            Item {
-              id: lifeBlock
-              anchors.horizontalCenter: parent.horizontalCenter
-              width: gridColumn.width
-              height: Math.max(lifeLabel.implicitHeight, Style.space(10))
-
-              Text {
-                id: lifeLabel
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                text: "LIFE"
-                color: Qt.darker(root.contentForeground, 1.5)
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.letterSpacing: 1
-              }
-
-              Text {
-                id: lifePercent
-                textFormat: Text.PlainText
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.lifeDonePercent + "%"
-                color: root.contentForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              Rectangle {
-                anchors.left: lifeLabel.right
-                anchors.right: lifePercent.left
-                anchors.leftMargin: Style.space(12)
-                anchors.rightMargin: Style.space(12)
-                anchors.verticalCenter: parent.verticalCenter
-                height: Style.space(6)
-                radius: Style.cornerRadius > 0 ? height / 2 : 0
-                color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.12)
-
-                Rectangle {
-                  width: Math.round(parent.width * root.lifeDone)
-                  height: parent.height
-                  radius: parent.radius
-                  color: Style.selectedStateColor(root.contentForeground, Color.accent)
-
-                  Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                }
-              }
-
-              TapHandler {
-                onDoubleTapped: root.clearLife()
-              }
-
-              MouseArea {
-                id: lifeMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                acceptedButtons: Qt.NoButton
-
-                PanelToolTip {
-                  visible: lifeMouse.containsMouse
-                  text: "Memento Mori"
-                  fontFamily: root.contentFontFamily
-                }
-              }
-            }
-          }
-
-          // ---- Month grid: week numbers down a gutter on the left, then
-          //      the seven day columns. Always six rows, so the popup is
-          //      exactly as tall in February as it is in August.
-          Item {
-            width: parent.width
-            height: gridColumn.y + gridColumn.height
-
-            WheelHandler {
-              onWheel: function(event) {
-                // Horizontal wheels and touchpad side-scrolls report y === 0;
-                // without this they would every one read as "next month".
-                if (event.angleDelta.y === 0) return
-                root.moveMonth(event.angleDelta.y > 0 ? -1 : 1)
-              }
-            }
-
-            Column {
-              id: gridColumn
-              // The meter above is a solid rule; the grid needs room to
-              // read as its own block rather than hanging off it.
-              y: Style.space(18)
-              anchors.horizontalCenter: parent.horizontalCenter
-              spacing: Style.space(3)
-
-              Row {
-                id: headerRow
-                spacing: root.cellSpacing
-
-                // The week-number heading doubles as the week-start toggle.
-                // It is the one control in the panel whose meaning is not
-                // self-evident, so it carries a tooltip naming the day the
-                // click will switch to.
-                Rectangle {
-                  width: root.weekColumnWidth
-                  height: Style.space(16)
-                  radius: Style.cornerRadius
-                  color: weekStartMouse.containsMouse
-                    ? Style.hoverFillFor(root.contentForeground, Color.accent)
-                    : "transparent"
+                  spacing: Style.space(10)
 
                   Text {
-                    anchors.centerIn: parent
-                    text: "W"
-                    color: weekStartMouse.containsMouse
-                      ? Style.hoverStateColor(root.contentForeground, Color.accent)
-                      : Qt.darker(root.contentForeground, 1.9)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "BORN"
+                    color: Qt.darker(root.contentForeground, 1.5)
                     font.family: root.contentFontFamily
-                    font.pixelSize: Style.font.caption
+                    font.pixelSize: Style.font.bodySmall
                     font.letterSpacing: 1
-                    font.bold: true
                   }
 
-                  MouseArea {
-                    id: weekStartMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.toggleWeekStart()
+                  TextField {
+                    id: bornField
+                    width: Style.space(70)
+                    anchors.verticalCenter: parent.verticalCenter
+                    placeholderText: "year"
+                    foreground: root.contentForeground
+                    font.family: root.contentFontFamily
+                    inputMethodHints: Qt.ImhDigitsOnly
+
+                    Keys.onPressed: function(event) { root.handleLifeKey(event, expectancyField) }
                   }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: 0
+                    leftPadding: Style.space(6)
+                    text: "LIVE TO"
+                    color: Qt.darker(root.contentForeground, 1.5)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.letterSpacing: 1
+                  }
+
+                  TextField {
+                    id: expectancyField
+                    width: Style.space(60)
+                    anchors.verticalCenter: parent.verticalCenter
+                    placeholderText: "90"
+                    foreground: root.contentForeground
+                    font.family: root.contentFontFamily
+                    inputMethodHints: Qt.ImhDigitsOnly
+
+                    Keys.onPressed: function(event) { root.handleLifeKey(event, bornField) }
+                  }
+                }
+
+                Text {
+                  id: yearLabel
+                  textFormat: Text.PlainText
+                  visible: !root.editingLife
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.today.getFullYear()
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.letterSpacing: 1
+                }
+
+                Text {
+                  id: yearPercent
+                  textFormat: Text.PlainText
+                  visible: !root.editingLife
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.yearDonePercent + "%"
+                  color: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Rectangle {
+                  id: yearTrack
+                  visible: !root.editingLife
+                  anchors.left: yearLabel.right
+                  anchors.right: yearPercent.left
+                  anchors.leftMargin: Style.space(12)
+                  anchors.rightMargin: Style.space(12)
+                  anchors.verticalCenter: parent.verticalCenter
+                  height: Style.space(6)
+                  radius: Style.cornerRadius > 0 ? height / 2 : 0
+                  color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.12)
+
+                  Rectangle {
+                    width: Math.round(parent.width * root.yearDone)
+                    height: parent.height
+                    radius: parent.radius
+                    color: Style.selectedStateColor(root.contentForeground, Color.accent)
+
+                    Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                  }
+                }
+              }
+            }
+
+            // ---- Memento mori. Only here once someone has gone looking and
+            //      given an age; the same rail as the year above it, measured
+            //      against a nominal lifetime.
+            Item {
+              visible: root.birthYear > 0
+              width: parent.width
+              height: visible ? lifeBlock.height : 0
+
+              Item {
+                id: lifeBlock
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: gridColumn.width
+                height: Math.max(lifeLabel.implicitHeight, Style.space(10))
+
+                Text {
+                  id: lifeLabel
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "LIFE"
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.letterSpacing: 1
+                }
+
+                Text {
+                  id: lifePercent
+                  textFormat: Text.PlainText
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.lifeDonePercent + "%"
+                  color: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Rectangle {
+                  anchors.left: lifeLabel.right
+                  anchors.right: lifePercent.left
+                  anchors.leftMargin: Style.space(12)
+                  anchors.rightMargin: Style.space(12)
+                  anchors.verticalCenter: parent.verticalCenter
+                  height: Style.space(6)
+                  radius: Style.cornerRadius > 0 ? height / 2 : 0
+                  color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.12)
+
+                  Rectangle {
+                    width: Math.round(parent.width * root.lifeDone)
+                    height: parent.height
+                    radius: parent.radius
+                    color: Style.selectedStateColor(root.contentForeground, Color.accent)
+
+                    Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                  }
+                }
+
+                TapHandler {
+                  onDoubleTapped: root.clearLife()
+                }
+
+                MouseArea {
+                  id: lifeMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  acceptedButtons: Qt.NoButton
 
                   PanelToolTip {
-                    visible: weekStartMouse.containsMouse
-                    text: "Start weeks on " + root.nextWeekStartLabel
+                    visible: lifeMouse.containsMouse
+                    text: "Memento Mori"
                     fontFamily: root.contentFontFamily
                   }
                 }
+              }
+            }
 
-                Item {
-                  width: root.gutterWidth
-                  height: Style.space(16)
-                }
+            // ---- Month grid: week numbers down a gutter on the left, then
+            //      the seven day columns. Always six rows, so the popup is
+            //      exactly as tall in February as it is in August.
+            Item {
+              width: parent.width
+              height: gridColumn.y + gridColumn.height
 
-                Repeater {
-                  model: root.weekdays
-
-                  Text {
-                    textFormat: Text.PlainText
-                    required property var modelData
-                    width: root.cellWidth
-                    height: Style.space(16)
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    text: root.weekdayLabel(modelData)
-                    color: Qt.darker(root.contentForeground, 1.5)
-                    font.family: root.contentFontFamily
-                    font.pixelSize: Style.font.caption
-                    font.letterSpacing: 1
-                    font.bold: true
-                  }
+              WheelHandler {
+                onWheel: function(event) {
+                  // Horizontal wheels and touchpad side-scrolls report y === 0;
+                  // without this they would every one read as "next month".
+                  if (event.angleDelta.y === 0) return
+                  root.moveMonth(event.angleDelta.y > 0 ? -1 : 1)
                 }
               }
 
-              Repeater {
-                model: root.weeks
+              Column {
+                id: gridColumn
+                // The meter above is a solid rule; the grid needs room to
+                // read as its own block rather than hanging off it.
+                y: Style.space(18)
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.space(3)
 
                 Row {
-                  required property var modelData
+                  id: headerRow
                   spacing: root.cellSpacing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  // The week-number heading doubles as the week-start toggle.
+                  // It is the one control in the panel whose meaning is not
+                  // self-evident, so it carries a tooltip naming the day the
+                  // click will switch to.
+                  Rectangle {
                     width: root.weekColumnWidth
-                    height: root.cellHeight
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    text: modelData.week
-                    color: Qt.darker(root.contentForeground, 1.9)
-                    font.family: root.contentFontFamily
-                    font.pixelSize: Style.font.caption
+                    height: Style.space(16)
+                    radius: Style.cornerRadius
+                    color: weekStartMouse.containsMouse
+                      ? Style.hoverFillFor(root.contentForeground, Color.accent)
+                      : "transparent"
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "W"
+                      color: weekStartMouse.containsMouse
+                        ? Style.hoverStateColor(root.contentForeground, Color.accent)
+                        : Qt.darker(root.contentForeground, 1.9)
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.caption
+                      font.letterSpacing: 1
+                      font.bold: true
+                    }
+
+                    MouseArea {
+                      id: weekStartMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.toggleWeekStart()
+                    }
+
+                    PanelToolTip {
+                      visible: weekStartMouse.containsMouse
+                      text: "Start weeks on " + root.nextWeekStartLabel
+                      fontFamily: root.contentFontFamily
+                    }
                   }
 
                   Item {
                     width: root.gutterWidth
-                    height: root.cellHeight
+                    height: Style.space(16)
                   }
 
                   Repeater {
-                    model: modelData.days
+                    model: root.weekdays
 
-                    Rectangle {
-                      id: dayCell
+                    Text {
+                      textFormat: Text.PlainText
                       required property var modelData
-
-                      property string dayFlags: Model.holidayFlagsForDay(root.easterHolidays, modelData.year, modelData.month, modelData.day)
-                      property string dayHolidays: Model.holidayLabelsForDay(root.easterHolidays, modelData.year, modelData.month, modelData.day)
-                      property bool hasHoliday: root.holidayCountry() !== "" && dayFlags.indexOf(root.holidayCountry()) !== -1
-
                       width: root.cellWidth
+                      height: Style.space(16)
+                      horizontalAlignment: Text.AlignHCenter
+                      verticalAlignment: Text.AlignVCenter
+                      text: root.weekdayLabel(modelData)
+                      color: Qt.darker(root.contentForeground, 1.5)
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.caption
+                      font.letterSpacing: 1
+                      font.bold: true
+                    }
+                  }
+                }
+
+                Repeater {
+                  model: root.weeks
+
+                  Row {
+                    required property var modelData
+                    spacing: root.cellSpacing
+
+                    Text {
+                      textFormat: Text.PlainText
+                      width: root.weekColumnWidth
                       height: root.cellHeight
-                      radius: Style.cornerRadius
-                      // Today is outlined, not filled: a lit-up block shouts
-                      // over a grid this quiet.
-                      color: "transparent"
-                      border.width: modelData.today ? Style.spacing.hairline : 0
-                      border.color: Style.normalBorderFor(root.contentForeground, Color.accent)
+                      horizontalAlignment: Text.AlignHCenter
+                      verticalAlignment: Text.AlignVCenter
+                      text: modelData.week
+                      color: Qt.darker(root.contentForeground, 1.9)
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.caption
+                    }
 
-                      Text {
-                        textFormat: Text.PlainText
-                        anchors.centerIn: parent
-                        text: modelData.day
-                        color: modelData.inMonth
-                          ? (modelData.weekend ? Qt.darker(root.contentForeground, 1.45) : root.contentForeground)
-                          : Qt.darker(root.contentForeground, 2.2)
-                        font.family: root.contentFontFamily
-                        font.pixelSize: Style.font.body
-                        font.bold: modelData.today
-                      }
+                    Item {
+                      width: root.gutterWidth
+                      height: root.cellHeight
+                    }
 
-                      // Holiday mark, a dot under the day number only when
-                      // that day is one in the configured country. Hovering
-                      // the cell names the holiday.
+                    Repeater {
+                      model: modelData.days
+
                       Rectangle {
-                        visible: dayCell.hasHoliday
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.bottom: parent.bottom
-                        anchors.bottomMargin: Style.space(3)
-                        width: Style.space(5)
-                        height: Style.space(5)
-                        radius: width / 2
-                        color: Style.selectedStateColor(root.contentForeground, Color.accent)
-                      }
+                        id: dayCell
+                        required property var modelData
 
-                      MouseArea {
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        acceptedButtons: Qt.NoButton
+                        property string dayFlags: Model.holidayFlagsForDay(root.easterHolidays, modelData.year, modelData.month, modelData.day)
+                        property string dayHolidays: Model.holidayLabelsForDay(root.easterHolidays, modelData.year, modelData.month, modelData.day)
+                        property bool hasHoliday: root.holidayCountry() !== "" && dayFlags.indexOf(root.holidayCountry()) !== -1
 
-                        PanelToolTip {
-                          visible: parent.containsMouse && dayCell.hasHoliday
-                          text: dayCell.dayHolidays
-                          fontFamily: root.contentFontFamily
+                        width: root.cellWidth
+                        height: root.cellHeight
+                        radius: Style.cornerRadius
+                        // Today is outlined, not filled: a lit-up block shouts
+                        // over a grid this quiet.
+                        color: "transparent"
+                        border.width: modelData.today ? Style.spacing.hairline : 0
+                        border.color: Style.normalBorderFor(root.contentForeground, Color.accent)
+
+                        Text {
+                          textFormat: Text.PlainText
+                          anchors.centerIn: parent
+                          text: modelData.day
+                          color: modelData.inMonth
+                            ? (modelData.weekend ? Qt.darker(root.contentForeground, 1.45) : root.contentForeground)
+                            : Qt.darker(root.contentForeground, 2.2)
+                          font.family: root.contentFontFamily
+                          font.pixelSize: Style.font.body
+                          font.bold: modelData.today
+                        }
+
+                        // Holiday mark, a dot under the day number only when
+                        // that day is one in the configured country. Hovering
+                        // the cell names the holiday.
+                        Rectangle {
+                          visible: dayCell.hasHoliday
+                          anchors.horizontalCenter: parent.horizontalCenter
+                          anchors.bottom: parent.bottom
+                          anchors.bottomMargin: Style.space(3)
+                          width: Style.space(5)
+                          height: Style.space(5)
+                          radius: width / 2
+                          color: Style.selectedStateColor(root.contentForeground, Color.accent)
+                        }
+
+                        MouseArea {
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          acceptedButtons: Qt.NoButton
+
+                          PanelToolTip {
+                            visible: parent.containsMouse && dayCell.hasHoliday
+                            text: dayCell.dayHolidays
+                            fontFamily: root.contentFontFamily
+                          }
                         }
                       }
                     }
                   }
                 }
               }
+
+              // Hairline down the week-number gutter, drawn only beside the
+              // day rows so it does not cut through the header band.
+              Rectangle {
+                x: gridColumn.x + root.weekColumnWidth + root.cellSpacing + Math.round((root.gutterWidth - width) / 2)
+                y: gridColumn.y + headerRow.height + gridColumn.spacing
+                width: Style.spacing.hairline
+                height: gridColumn.height - headerRow.height - gridColumn.spacing
+                color: root.contentForeground
+                opacity: 0.1
+              }
             }
 
-            // Hairline down the week-number gutter, drawn only beside the
-            // day rows so it does not cut through the header band.
-            Rectangle {
-              x: gridColumn.x + root.weekColumnWidth + root.cellSpacing + Math.round((root.gutterWidth - width) / 2)
-              y: gridColumn.y + headerRow.height + gridColumn.spacing
-              width: Style.spacing.hairline
-              height: gridColumn.height - headerRow.height - gridColumn.spacing
-              color: root.contentForeground
-              opacity: 0.1
-            }
-          }
-
-          // ---- Month stepping, spanning the grid it drives. The chevrons
-          //      sit on the grid's outer bounds, the same edges the year
-          //      rail above uses, so the row reads as the panel's other
-          //      full-width rail instead of a cluster floating in space.
-          //      The label is centered and fixed-width, so it holds still
-          //      from "MAY" to "SEPTEMBER".
-          Item {
-            width: parent.width
-            height: monthNav.height
-
+            // ---- Month stepping, spanning the grid it drives. The chevrons
+            //      sit on the grid's outer bounds, the same edges the year
+            //      rail above uses, so the row reads as the panel's other
+            //      full-width rail instead of a cluster floating in space.
+            //      The label is centered and fixed-width, so it holds still
+            //      from "MAY" to "SEPTEMBER".
             Item {
-              id: monthNav
-              anchors.horizontalCenter: parent.horizontalCenter
-              width: gridColumn.width
-              height: monthLabel.implicitHeight + Style.space(10)
+              width: parent.width
+              height: monthNav.height
+
+              Item {
+                id: monthNav
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: gridColumn.width
+                height: monthLabel.implicitHeight + Style.space(10)
+
+                Text {
+                  id: monthLabel
+                  textFormat: Text.PlainText
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  anchors.verticalCenter: parent.verticalCenter
+                  // Fixed width so the chevrons hold still between a
+                  // "MAY 2026" and a "SEPTEMBER 2026".
+                  width: Style.space(130)
+                  horizontalAlignment: Text.AlignHCenter
+                  text: Qt.formatDate(root.viewDate, "MMMM yyyy").toUpperCase()
+                  color: Qt.darker(root.contentForeground, 1.4)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.body
+                  font.letterSpacing: 1
+                }
+
+                PanelActionButton {
+                  // Pulled out by the button's own padding so the glyph, not
+                  // its hit box, lines up with the "2026" on the year rail.
+                  anchors.left: parent.left
+                  anchors.leftMargin: -Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  iconText: "󰅁"
+                  tooltipText: "Previous month"
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                  onClicked: root.moveMonth(-1)
+                }
+
+                PanelActionButton {
+                  anchors.right: parent.right
+                  anchors.rightMargin: -Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  iconText: "󰅂"
+                  tooltipText: "Next month"
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                  onClicked: root.moveMonth(1)
+                }
+              }
+            }
+
+            // ---- World clock, when places are configured: each row is the
+            //      place name, its local time, and the country code the
+            //      model attached. Nothing renders without any places.
+            Item {
+              visible: root.places.length > 0
+              width: parent.width
+              height: visible ? worldBlock.height : 0
+
+              Item {
+                id: worldBlock
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: gridColumn.width
+                height: worldColumn.height
+
+                Column {
+                  id: worldColumn
+                  width: parent.width
+                  spacing: Style.space(5)
+
+                  Text {
+                    text: "WORLD"
+                    color: Qt.darker(root.contentForeground, 1.5)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    font.letterSpacing: 1
+                    font.bold: true
+                  }
+
+                  Repeater {
+                    model: root.worldRows
+
+                    Item {
+                      required property var modelData
+                      width: worldColumn.width
+                      height: Style.space(22)
+
+                      Text {
+                        textFormat: Text.PlainText
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: modelData.name
+                        color: root.contentForeground
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+
+                      Text {
+                        textFormat: Text.PlainText
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: modelData.time + "  " + modelData.cc
+                        color: Qt.darker(root.contentForeground, 1.5)
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            // ---- Current conditions, one quiet line beneath the calendar
+            //      when a report is available. The glyph and the "feels"
+            //      both come out of the model's report parser.
+            Item {
+              visible: root.climate !== null
+              width: parent.width
+              height: visible ? climateItem.height : 0
 
               Text {
-                id: monthLabel
+                id: climateItem
                 textFormat: Text.PlainText
                 anchors.horizontalCenter: parent.horizontalCenter
-                anchors.verticalCenter: parent.verticalCenter
-                // Fixed width so the chevrons hold still between a
-                // "MAY 2026" and a "SEPTEMBER 2026".
-                width: Style.space(130)
-                horizontalAlignment: Text.AlignHCenter
-                text: Qt.formatDate(root.viewDate, "MMMM yyyy").toUpperCase()
-                color: Qt.darker(root.contentForeground, 1.4)
+                text: root.climateText()
+                color: Qt.darker(root.contentForeground, 1.5)
                 font.family: root.contentFontFamily
-                font.pixelSize: Style.font.body
-                font.letterSpacing: 1
-              }
-
-              PanelActionButton {
-                // Pulled out by the button's own padding so the glyph, not
-                // its hit box, lines up with the "2026" on the year rail.
-                anchors.left: parent.left
-                anchors.leftMargin: -Style.space(8)
-                anchors.verticalCenter: parent.verticalCenter
-                iconText: "󰅁"
-                tooltipText: "Previous month"
-                foreground: root.contentForeground
-                fontFamily: root.contentFontFamily
-                onClicked: root.moveMonth(-1)
-              }
-
-              PanelActionButton {
-                anchors.right: parent.right
-                anchors.rightMargin: -Style.space(8)
-                anchors.verticalCenter: parent.verticalCenter
-                iconText: "󰅂"
-                tooltipText: "Next month"
-                foreground: root.contentForeground
-                fontFamily: root.contentFontFamily
-                onClicked: root.moveMonth(1)
+                font.pixelSize: Style.font.bodySmall
               }
             }
-          }
 
-          // ---- World clock, when places are configured: each row is the
-          //      place name, its local time, and the country code the
-          //      model attached. Nothing renders without any places.
-          Item {
-            visible: root.places.length > 0
-            width: parent.width
-            height: visible ? worldBlock.height : 0
-
+            // ---- Upcoming holidays, a few capped lines the model already
+            //      sorted and dated. The date is read off the model's key.
             Item {
-              id: worldBlock
-              anchors.horizontalCenter: parent.horizontalCenter
-              width: gridColumn.width
-              height: worldColumn.height
+              visible: root.upcomingList.length > 0
+              width: parent.width
+              height: visible ? upcomingBlock.height : 0
 
-              Column {
-                id: worldColumn
-                width: parent.width
-                spacing: Style.space(5)
+              Item {
+                id: upcomingBlock
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: gridColumn.width
+                height: upcomingColumn.height
 
-                Text {
-                  text: "WORLD"
-                  color: Qt.darker(root.contentForeground, 1.5)
-                  font.family: root.contentFontFamily
-                  font.pixelSize: Style.font.caption
-                  font.letterSpacing: 1
-                  font.bold: true
-                }
+                Column {
+                  id: upcomingColumn
+                  width: parent.width
+                  spacing: Style.space(5)
 
-                Repeater {
-                  model: root.worldRows
+                  Text {
+                    text: "UPCOMING"
+                    color: Qt.darker(root.contentForeground, 1.5)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    font.letterSpacing: 1
+                    font.bold: true
+                  }
 
-                  Item {
-                    required property var modelData
-                    width: worldColumn.width
-                    height: Style.space(22)
+                  Repeater {
+                    model: root.upcomingList
 
-                    Text {
-                      textFormat: Text.PlainText
-                      anchors.left: parent.left
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: modelData.name
-                      color: root.contentForeground
-                      font.family: root.contentFontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
+                    Item {
+                      required property var modelData
+                      width: upcomingColumn.width
+                      height: Style.space(22)
 
-                    Text {
-                      textFormat: Text.PlainText
-                      anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: modelData.time + "  " + modelData.cc
-                      color: Qt.darker(root.contentForeground, 1.5)
-                      font.family: root.contentFontFamily
-                      font.pixelSize: Style.font.bodySmall
+                      Text {
+                        textFormat: Text.PlainText
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: modelData.name
+                        color: root.contentForeground
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+
+                      Text {
+                        textFormat: Text.PlainText
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: Qt.formatDate(new Date(Number(modelData.key.slice(0, 4)), Number(modelData.key.slice(5, 7)) - 1, Number(modelData.key.slice(8, 10))), "d MMM · yyyy", root.labelLocale)
+                        color: Qt.darker(root.contentForeground, 1.5)
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
                     }
                   }
                 }
@@ -892,80 +1142,320 @@ Panel {
             }
           }
 
-          // ---- Current conditions, one quiet line beneath the calendar
-          //      when a report is available. The glyph and the "feels"
-          //      both come out of the model's report parser.
+          // ---- Settings sheet. Same centered column width as the calendar
+          //      grid so the swap reads as one surface; each section is a
+          //      small-caps header over a control, with a dim hint line under
+          //      the control explaining what it does. Every write goes
+          //      through persistSettings() and applies the moment you click.
           Item {
-            visible: root.climate !== null
+            id: settingsView
+            visible: root.showingSettings
             width: parent.width
-            height: visible ? climateItem.height : 0
+            implicitHeight: settingsBody.height
 
-            Text {
-              id: climateItem
-              textFormat: Text.PlainText
-              anchors.horizontalCenter: parent.horizontalCenter
-              text: root.climateText()
-              color: Qt.darker(root.contentForeground, 1.5)
-              font.family: root.contentFontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-          }
-
-          // ---- Upcoming holidays, a few capped lines the model already
-          //      sorted and dated. The date is read off the model's key.
-          Item {
-            visible: root.upcomingList.length > 0
-            width: parent.width
-            height: visible ? upcomingBlock.height : 0
-
-            Item {
-              id: upcomingBlock
+            Column {
+              id: settingsBody
               anchors.horizontalCenter: parent.horizontalCenter
               width: gridColumn.width
-              height: upcomingColumn.height
+              spacing: Style.space(6)
 
+              // ---- Display
               Column {
-                id: upcomingColumn
                 width: parent.width
-                spacing: Style.space(5)
+                spacing: Style.space(6)
+
+                PanelSectionHeader {
+                  text: "DISPLAY"
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                }
+
+                Flow {
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  Repeater {
+                    model: root.displayFormatOptions
+
+                    Button {
+                      required property var modelData
+                      text: root.formatDisplayLabel(modelData.format)
+                      tooltipText: modelData.format
+                      selected: modelData.selected
+                      bordered: true
+                      focusable: true
+                      foreground: root.contentForeground
+                      background: Color.background
+                      accent: Color.accent
+                      fontFamily: root.contentFontFamily
+                      fontSize: Style.font.bodySmall
+                      onClicked: root.setClockFormat(modelData.format)
+                    }
+                  }
+                }
 
                 Text {
-                  text: "UPCOMING"
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: "Live previews of the bar label. Right-clicking the bar clock cycles formats, too."
                   color: Qt.darker(root.contentForeground, 1.5)
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.caption
-                  font.letterSpacing: 1
-                  font.bold: true
+                }
+              }
+
+              // ---- Calendar
+              Column {
+                width: parent.width
+                spacing: Style.space(6)
+
+                PanelSeparator {
+                  width: parent.width
+                  foreground: root.contentForeground
                 }
 
-                Repeater {
-                  model: root.upcomingList
+                PanelSectionHeader {
+                  text: "CALENDAR"
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                }
 
-                  Item {
-                    required property var modelData
-                    width: upcomingColumn.width
-                    height: Style.space(22)
+                ButtonGroup {
+                  options: [
+                    { value: "default", label: "Default", tooltip: "Follow the system locale" },
+                    { value: "monday", label: "Monday", tooltip: "ISO-style weeks" },
+                    { value: "sunday", label: "Sunday", tooltip: "American convention" }
+                  ]
+                  value: root.weekStartChoice
+                  foreground: root.contentForeground
+                  background: Color.background
+                  accent: Color.accent
+                  fontFamily: root.contentFontFamily
+                  onChanged: function(value) { root.setWeekStartChoice(value) }
+                }
 
-                    Text {
-                      textFormat: Text.PlainText
-                      anchors.left: parent.left
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: modelData.name
-                      color: root.contentForeground
-                      font.family: root.contentFontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: "Where the grid starts its week. Default follows the locale; the grid's W heading toggles Monday/Sunday on the spot."
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
 
-                    Text {
-                      textFormat: Text.PlainText
-                      anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: Qt.formatDate(new Date(Number(modelData.key.slice(0, 4)), Number(modelData.key.slice(5, 7)) - 1, Number(modelData.key.slice(8, 10))), "d MMM · yyyy", root.labelLocale)
-                      color: Qt.darker(root.contentForeground, 1.5)
-                      font.family: root.contentFontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
+              // ---- World clock
+              Column {
+                width: parent.width
+                spacing: Style.space(6)
+
+                PanelSeparator {
+                  width: parent.width
+                  foreground: root.contentForeground
+                }
+
+                PanelSectionHeader {
+                  text: "WORLD CLOCK"
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                }
+
+                QQC.TextArea {
+                  id: placesEditor
+                  width: parent.width
+                  height: Style.space(88)
+                  text: root.setting("places", "")
+                  placeholderText: "Nairobi, KE\nLondon, GB\nTokyo, JP"
+                  placeholderTextColor: Qt.darker(root.contentForeground, 1.6)
+                  color: root.contentForeground
+                  selectionColor: Style.selectionFillFor(root.contentForeground, Color.accent)
+                  selectedTextColor: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: TextEdit.Wrap
+                  selectByMouse: true
+                  leftPadding: Style.spacing.controlPaddingX + Border.left(Border.controlSpec("normal", root.contentForeground, Color.accent))
+                  rightPadding: Style.spacing.controlPaddingX + Border.right(Border.controlSpec("normal", root.contentForeground, Color.accent))
+                  topPadding: Style.spacing.inputPaddingY + Border.top(Border.controlSpec("normal", root.contentForeground, Color.accent))
+                  bottomPadding: Style.spacing.inputPaddingY + Border.bottom(Border.controlSpec("normal", root.contentForeground, Color.accent))
+
+                  background: BorderSurface {
+                    color: Style.controlFill(false, false, root.contentForeground, Color.accent)
+                    borderSpec: Border.controlSpec("normal", root.contentForeground, Color.accent)
+                    radius: Style.cornerRadius
                   }
+
+                  onEditingFinished: root.commitPlacesText(text)
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: "One place per line, using Name, CC — e.g. Nairobi, KE. Comma-separated pairs also drive the country filters below."
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              // ---- Climate
+              Column {
+                width: parent.width
+                spacing: Style.space(6)
+
+                PanelSeparator {
+                  width: parent.width
+                  foreground: root.contentForeground
+                }
+
+                PanelSectionHeader {
+                  text: "CLIMATE"
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                }
+
+                ButtonGroup {
+                  options: [
+                    { value: "metric", label: "Metric", tooltip: "\u00b0C" },
+                    { value: "imperial", label: "Imperial", tooltip: "\u00b0F" }
+                  ]
+                  value: root.unitChoice
+                  foreground: root.contentForeground
+                  background: Color.background
+                  accent: Color.accent
+                  fontFamily: root.contentFontFamily
+                  onChanged: function(value) { root.setUnit(value) }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: "Units for the current-conditions line. Weather data itself arrives from the weather setting in shell.json."
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              // ---- Holidays
+              Column {
+                width: parent.width
+                spacing: Style.space(6)
+
+                PanelSeparator {
+                  width: parent.width
+                  foreground: root.contentForeground
+                }
+
+                PanelSectionHeader {
+                  text: "HOLIDAYS"
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                }
+
+                TextField {
+                  id: countryField
+                  width: parent.width
+                  text: root.setting("holidayCountry", "")
+                  placeholderText: "Kenya, KE"
+                  foreground: root.contentForeground
+                  accent: Color.accent
+                  font.family: root.contentFontFamily
+                  onEditingFinished: root.commitHolidayCountry(text)
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: "Marks the holiday dots on the grid and feeds the UPCOMING list. One Name, CC pair — e.g. Kenya, KE."
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              // ---- Personal
+              Column {
+                width: parent.width
+                spacing: Style.space(6)
+
+                PanelSeparator {
+                  width: parent.width
+                  foreground: root.contentForeground
+                }
+
+                PanelSectionHeader {
+                  text: "PERSONAL"
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                }
+
+                Row {
+                  spacing: Style.space(12)
+
+                  NumberField {
+                    id: settingsBorn
+                    label: "BORN"
+                    value: root.birthYear
+                    from: 0
+                    to: root.today.getFullYear()
+                    stepSize: 1
+                    fieldWidth: Style.spacing.numberFieldWidth
+                    foreground: root.contentForeground
+                    accent: Color.accent
+                    fontFamily: root.contentFontFamily
+                    onModified: function(v) { root.commitBirthYear(v) }
+                  }
+
+                  NumberField {
+                    id: settingsExpectancy
+                    label: "LIVE TO"
+                    value: root.lifeExpectancy
+                    from: 0
+                    to: 120
+                    stepSize: 1
+                    fieldWidth: Style.spacing.numberFieldWidth
+                    foreground: root.contentForeground
+                    accent: Color.accent
+                    fontFamily: root.contentFontFamily
+                    onModified: function(v) { root.commitLifeExpectancy(v) }
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: "A birth year of 0 hides the LIFE meter under the calendar. LIVE TO runs it against a nominal lifetime (90)."
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              // ---- Footer
+              Column {
+                width: parent.width
+                spacing: Style.space(6)
+
+                PanelSeparator {
+                  width: parent.width
+                  foreground: root.contentForeground
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  horizontalAlignment: Text.AlignHCenter
+                  text: "myles.clock v1.0.0 \u00b7 changes reach shell.json instantly"
+                  color: Qt.darker(root.contentForeground, 2.0)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
                 }
               }
             }
