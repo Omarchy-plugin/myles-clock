@@ -1,0 +1,5 @@
+# Nothing generated belongs in the repo, but be explicit about local noise.
+*.swp
+*~
+.DS_Store
+node_modules/
