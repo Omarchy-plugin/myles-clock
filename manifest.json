@@ -3,7 +3,7 @@
   "id": "myles.clock",
   "name": "My Clock",
   "version": "1.0.0",
-  "author": "Omarchy",
+  "author": "Mylesoft",
   "description": "Date/time and calendar with merged world-clock places",
   "kinds": [
     "bar-widget"
