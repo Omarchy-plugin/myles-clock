@@ -26,6 +26,15 @@ var FIXED_HOLIDAYS = [
   { m:12, d:26, n:"Boxing Day / Utamaduni Day", cc:"KE UG" },
 ]
 
+var GLOBAL_HOLIDAYS = [
+  { m:1, d:1, n:"New Year's Day", cc:"GLOBAL" },
+  { m:3, d:8, n:"International Women's Day", cc:"GLOBAL" },
+  { m:5, d:1, n:"International Workers' Day", cc:"GLOBAL" },
+  { m:6, d:5, n:"World Environment Day", cc:"GLOBAL" },
+  { m:12, d:10, n:"Human Rights Day", cc:"GLOBAL" },
+  { m:12, d:25, n:"Christmas Day", cc:"GLOBAL" },
+]
+
 var LUNAR_HOLIDAYS = {
   2025: [
     { d:"2025-03-31", n:"Eid al-Fitr", cc:"KE UG", approx: true },
@@ -85,6 +94,50 @@ var LUNAR_HOLIDAYS = {
   ],
 }
 
+function fixedHolidays() {
+  return FIXED_HOLIDAYS
+}
+
+function globalHolidays() {
+  return GLOBAL_HOLIDAYS
+}
+
+function lunarHolidays() {
+  return LUNAR_HOLIDAYS
+}
+
+function holidayTable(year) {
+  var table = {}
+  var rows = FIXED_HOLIDAYS.concat(GLOBAL_HOLIDAYS)
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i]
+    var key = String(year) + "-" + (row.m < 10 ? "0" : "") + row.m + "-" + (row.d < 10 ? "0" : "") + row.d
+    if (!table[key]) table[key] = { n: row.n, cc: row.cc }
+    else {
+      table[key].cc += " " + row.cc
+      if (table[key].n.indexOf(row.n) === -1) table[key].n += " / " + row.n
+    }
+  }
+  var lunar = LUNAR_HOLIDAYS[year] || []
+  for (var j = 0; j < lunar.length; j++) {
+    var lunarRow = lunar[j]
+    if (!table[lunarRow.d]) table[lunarRow.d] = { n: lunarRow.n, cc: lunarRow.cc }
+    else {
+      table[lunarRow.d].cc += " " + lunarRow.cc
+      if (table[lunarRow.d].n.indexOf(lunarRow.n) === -1) table[lunarRow.d].n += " / " + lunarRow.n
+    }
+  }
+  return table
+}
+
 if (typeof module !== 'undefined') {
-  module.exports = { FIXED_HOLIDAYS: FIXED_HOLIDAYS, LUNAR_HOLIDAYS: LUNAR_HOLIDAYS }
+  module.exports = {
+    FIXED_HOLIDAYS: FIXED_HOLIDAYS,
+    GLOBAL_HOLIDAYS: GLOBAL_HOLIDAYS,
+    LUNAR_HOLIDAYS: LUNAR_HOLIDAYS,
+    fixedHolidays: fixedHolidays,
+    globalHolidays: globalHolidays,
+    lunarHolidays: lunarHolidays,
+    holidayTable: holidayTable
+  }
 }

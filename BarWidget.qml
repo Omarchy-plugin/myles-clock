@@ -12,6 +12,8 @@ import "Model.js" as Model
 // middle click opens the timezone picker.
 BarWidget {
   id: root
+  // Default matches the built-in; Bar overwrites this with the layout entry
+  // id (myles.clock) when the clone is mounted.
   moduleName: "omarchy.clock"
 
   property date displayDate: clock.date
@@ -131,6 +133,8 @@ BarWidget {
   }
 
   IpcHandler {
+    // Keep the built-in IPC target so omarchy-shell omarchy.clock … and
+    // keybindings keep working after cloning (same pattern as myles.agents).
     target: "omarchy.clock"
 
     function refresh(): void { root.broadcast("refresh") }

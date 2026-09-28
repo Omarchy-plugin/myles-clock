@@ -21,7 +21,9 @@ var REQUIRED = [
   "climateLine", "parseCountryList", "holidayFlagsForDay",
   "holidayLabelsForDay", "upcomingHolidays", "computusEaster",
   "easterHolidaysForYear", "addDays", "parseEvents", "eventsForDay",
-  "parsePlaces", "worldClockRows", "zoneTimeParts", "placeTimeString"
+  "parsePlaces", "worldClockRows", "zoneTimeParts", "placeTimeString",
+  "parseBirthdays", "birthdaysForDay", "upcomingPersonalEvents",
+  "placeCatalog", "searchPlaces", "addPlace", "removePlaceAt", "serializePlaces"
 ]
 
 for (var i = 0; i < REQUIRED.length; i++) {
@@ -137,6 +139,19 @@ assert.deepStrictEqual(M.eventsForDay(ev, 2025, 3, 5), ["Spring", "Market"])
 assert.deepStrictEqual(M.eventsForDay(ev, 2025, 3, 7), [])
 assert.deepStrictEqual(M.eventsForDay("2025-04-05|Walked", 2025, 3, 5), ["Walked"])
 assert.strictEqual(M.eventsForDay(M.parseEvents("2025-01-01|One\n2025-01-01|One"), 2025, 0, 1).length, 1)
+check(!M.parseEvents("2025-02-30|Impossible")["2025-02-30"], "invalid calendar date ignored")
+var birthdays = M.parseBirthdays("04-05|Alice\n12-31|Bob\n02-30|Bad\n04-05|Alice")
+assert.deepStrictEqual(birthdays["04-05"], ["Alice"])
+assert.deepStrictEqual(M.birthdaysForDay(birthdays, 2026, 3, 5), ["Alice"])
+assert.deepStrictEqual(M.birthdaysForDay(birthdays, 2026, 3, 6), [])
+var personal = M.upcomingPersonalEvents(
+  M.parseEvents("2026-04-06|Dentist\n2026-04-05|Market"),
+  birthdays, 4, "2026-04-05")
+assert.strictEqual(personal[0].name, "Alice")
+assert.strictEqual(personal[0].kind, "birthday")
+assert.strictEqual(personal[0].dayOffset, 0)
+assert.strictEqual(personal[1].name, "Market")
+assert.strictEqual(personal[2].name, "Dentist")
 
 // ---- world clock ----------------------------------------------------------
 var places = M.parsePlaces("Nairobi, KE\nnairobi, KE\ntokyo, JP\nbad line")
@@ -159,7 +174,25 @@ assert.strictEqual(rows.length, 2)
 assert.strictEqual(rows[0].name, "Nairobi")
 assert.strictEqual(rows[0].minute, 0)
 assert.strictEqual(rows[0].time, "3:00 AM")
+assert.strictEqual(rows[0].dateOffset, 0)
 assert.strictEqual(rows[1].time, "9:00 AM")
 assert.strictEqual(rows[1].ampm, "AM")
+var rollover = M.worldClockRows("Tokyo, JP\nNew York, US", new Date(Date.UTC(2025, 0, 1, 23, 30)))
+assert.strictEqual(rollover[0].dateOffset, 1)
+assert.strictEqual(rollover[1].dateOffset, 0)
+
+
+var Countries = require("../countries.js")
+var catalog = M.placeCatalog(Countries.COUNTRIES)
+check(catalog.length > 100, "placeCatalog includes countries")
+var hits = M.searchPlaces(catalog, "nairo", 6)
+assert.strictEqual(hits[0].name, "Nairobi")
+assert.strictEqual(hits[0].cc, "KE")
+assert.strictEqual(hits[0].zone, "Africa/Nairobi")
+var added = M.addPlace("Nairobi, KE, Africa/Nairobi", "Paris", "FR", "Europe/Paris")
+assert.strictEqual(added, "Nairobi, KE, Africa/Nairobi\nParis, FR, Europe/Paris")
+assert.strictEqual(M.addPlace(added, "Paris", "FR", "Europe/Paris"), added)
+assert.strictEqual(M.removePlaceAt(added, 0), "Paris, FR, Europe/Paris")
+assert.strictEqual(M.serializePlaces(M.parsePlaces(added)), added)
 
 console.log("PASS test-core: " + checks + " checks")
